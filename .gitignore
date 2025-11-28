@@ -6,3 +6,9 @@ LLM-Analysis-TDS-Project-2/
 .venv
 uv.lock
 LLM-Analysis-TDS-Project-2/
+.env
+.venv
+uv.lock
+LLM-Analysis-TDS-Project-2/
+.DS_Store
+.env.example
