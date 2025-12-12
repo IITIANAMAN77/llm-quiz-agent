@@ -1,71 +1,47 @@
-# http_app.py — wrapper that calls agent.run_agent instead of mounting agent.app
+# http_app.py
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Optional, Any
 import traceback
-import os
 
-# Try to import run_agent (callable) from your agent module.
-agent_available = False
-agent_import_error = None
-agent_run = None
-
+# try to import your agent implementation
 try:
-    # agent.run_agent(url: str) -> str
-    from agent import run_agent as agent_run
-    agent_available = True
+    import agent   # ensures agent.py is importable from repo root
+    AGENT_IMPORT_ERROR = None
 except Exception as e:
-    agent_import_error = str(e)
-    agent_run = None
-    agent_available = False
+    agent = None
+    AGENT_IMPORT_ERROR = "".join(traceback.format_exception_only(type(e), e)).strip()
 
-app = FastAPI(title="LLM Analysis Quiz - HTTP Wrapper (callable adapter)")
+app = FastAPI(title="LLM Quiz Agent Space")
 
-@app.get("/")
-def root():
-    return JSONResponse({
-        "status": "ok",
-        "message": "LLM Analysis Quiz agent wrapper running.",
-        "agent_import_error": agent_import_error
-    })
-
-@app.get("/health")
-def health():
-    return JSONResponse({"status": "healthy", "agent_available": agent_available})
-
-# Pydantic model for the incoming /agent/solve payload
-class SolvePayload(BaseModel):
+class SolveRequest(BaseModel):
     email: str
     secret: str
     url: str
+    # add any other optional fields the agent expects
+    data: Optional[Any] = None
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "LLM Quiz Agent Space Running", "agent_available": agent is not None, "agent_import_error": AGENT_IMPORT_ERROR}
+
+@app.get("/debug")
+def debug_info():
+    return {"agent_mounted": agent is not None, "agent_import_error": AGENT_IMPORT_ERROR}
+
+# Expose the solve route (calls your agent.run_agent or a wrapper)
 @app.post("/agent/solve")
-def agent_solve(payload: SolvePayload):
-    """
-    Calls the underlying agent.run_agent(payload.url).
-    Returns {"status":"ok"} on success or {"status":"error","reason":...} on failure.
-    This keeps the HTTP wrapper simple and avoids mounting non-ASGI objects.
-    """
-    if not agent_available or agent_run is None:
-        return JSONResponse(
-            {"status": "error", "reason": "Agent not available", "agent_import_error": agent_import_error},
-            status_code=500
-        )
+def agent_solve(req: SolveRequest):
+    if agent is None:
+        return JSONResponse({"detail": "agent import failed", "error": AGENT_IMPORT_ERROR}, status_code=500)
 
+    # if your agent exposes run_agent(url) or similar adapt here
     try:
-        # Run the agent synchronously with the provided URL.
-        # agent.run_agent prints logs to stdout; it may run for up to a few minutes.
-        agent_run(payload.url)
-        return JSONResponse({"status": "ok"})
+        # If agent has run_agent(url) that starts the workflow:
+        result = agent.run_agent(req.url)
+        return {"status": "ok", "result": result}
     except Exception as e:
-        # Return the traceback to help debugging
-        tb = traceback.format_exc()
-        # Also write a small debug file
-        try:
-            outdir = os.path.expanduser("~/.llm_agent")
-            os.makedirs(outdir, exist_ok=True)
-            with open(os.path.join(outdir, "last_agent_exception.txt"), "w", encoding="utf8") as f:
-                f.write(tb)
-        except Exception:
-            pass
-        return JSONResponse({"status": "error", "reason": str(e), "traceback": tb}, status_code=500)
+        return JSONResponse({"detail": "agent error", "error": str(e)}, status_code=500)
+
+    

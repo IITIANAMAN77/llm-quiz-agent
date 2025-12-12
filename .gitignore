@@ -12,3 +12,11 @@ uv.lock
 LLM-Analysis-TDS-Project-2/
 .DS_Store
 .env.example
+.env
+__pycache__/
+*.pyc
+.venv/
+uv.lock
+payload.json
+server.log
+tdsproject2.egg-info/

@@ -28,9 +28,9 @@ TOOLS = [run_code, get_rendered_html, download_file, post_request, add_dependenc
 # GEMINI LLM
 # -------------------------------------------------
 rate_limiter = InMemoryRateLimiter(
-    requests_per_second=9/60,  
+    requests_per_second=1/60,  
     check_every_n_seconds=1,  
-    max_bucket_size=9  
+    max_bucket_size=1  
 )
 llm = init_chat_model(
    model_provider="google_genai",
