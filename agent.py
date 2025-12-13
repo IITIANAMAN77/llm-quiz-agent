@@ -1,89 +1,95 @@
-from langgraph.graph import StateGraph, END, START
-from langchain_core.rate_limiters import InMemoryRateLimiter
-from langgraph.prebuilt import ToolNode
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tools import get_rendered_html, download_file, post_request, run_code, add_dependencies
-# import the callable tool directly from its module to avoid passing a module object
-from tools.process_audio import process_audio
-from typing import TypedDict, Annotated, List, Any
-from langchain.chat_models import init_chat_model
-from langgraph.graph.message import add_messages
+# agent.py
 import os
+from typing import TypedDict, Annotated, List, Any
+
 from dotenv import load_dotenv
 load_dotenv()
 
-EMAIL = os.getenv("EMAIL")
-SECRET = os.getenv("SECRET")
-RECURSION_LIMIT =  5000
-# -------------------------------------------------
-# STATE
-# -------------------------------------------------
+# Safe fallback for HF environment
+EMAIL = os.getenv("EMAIL") or "23f2005127@ds.study.iitm.ac.in"
+SECRET = os.getenv("SECRET") or "AMAN@131004"
+
+RECURSION_LIMIT = 5000
+
+# -----------------------------
+# LangGraph + LangChain Imports
+# -----------------------------
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+from langchain.chat_models import init_chat_model
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.rate_limiters import InMemoryRateLimiter
+
+# -----------------------------
+# Import tools package
+# -----------------------------
+from tools import (
+    get_rendered_html,
+    download_file,
+    post_request,
+    run_code,
+    add_dependencies
+)
+from tools.process_audio import process_audio
+
+# Ensure tools list is correct
+TOOLS = [
+    run_code,
+    get_rendered_html,
+    download_file,
+    post_request,
+    add_dependencies,
+    process_audio
+]
+
+# -----------------------------
+# Agent State
+# -----------------------------
 class AgentState(TypedDict):
     messages: Annotated[List, add_messages]
 
-
-TOOLS = [run_code, get_rendered_html, download_file, post_request, add_dependencies, process_audio]
-
-# -------------------------------------------------
-# GEMINI LLM
-# -------------------------------------------------
+# -----------------------------
+# Gemini LLM with rate limiter
+# -----------------------------
 rate_limiter = InMemoryRateLimiter(
-    requests_per_second=1/60,  
-    check_every_n_seconds=1,  
-    max_bucket_size=1  
+    requests_per_second=1/60,
+    check_every_n_seconds=1,
+    max_bucket_size=1
 )
+
 llm = init_chat_model(
-   model_provider="google_genai",
-   model="gemini-2.5-flash",
-   rate_limiter=rate_limiter
-).bind_tools(TOOLS)   
+    model_provider="google_genai",
+    model="gemini-2.5-flash",
+    rate_limiter=rate_limiter
+).bind_tools(TOOLS)
 
-
-# -------------------------------------------------
+# -----------------------------
 # SYSTEM PROMPT
-# -------------------------------------------------
+# -----------------------------
 SYSTEM_PROMPT = f"""
 You are an autonomous quiz-solving agent.
 
-Your job is to:
-1. Load the quiz page from the given URL.
-2. Extract ALL instructions, required parameters, submission rules, and the submit endpoint.
+Your responsibilities:
+1. Load the quiz page from the provided URL.
+2. Extract all instructions, required parameters, submission rules, and the submit endpoint.
 3. Solve the task exactly as required.
-4. Submit the answer ONLY to the endpoint specified on the current page (never make up URLs).
-5. Read the server response and:
-   - If it contains a new quiz URL → fetch it immediately and continue.
-   - If no new URL is present → return "END".
+4. Submit the answer to the endpoint explicitly given in the task.
+5. Read server response and continue if a new URL is given.
+6. Only output "END" when the server no longer gives a new URL.
 
-STRICT RULES — FOLLOW EXACTLY:
+RULES:
+- Never guess URLs.
+- Never shorten or modify URLs.
+- Never stop until no new URL is provided.
+- Use provided tools only.
+- Follow instructions exactly.
+- Every request with email/secret use:
+  Email: {EMAIL}
+  Secret: {SECRET}
 
-GENERAL RULES:
-- NEVER stop early. Continue solving tasks until no new URL is provided.
-- NEVER hallucinate URLs, endpoints, fields, values, or JSON structure.
-- NEVER shorten or modify URLs. Always submit the full URL.
-- NEVER re-submit unless the server explicitly allows or it's within the 3-minute limit.
-- ALWAYS inspect the server response before deciding what to do next.
-- ALWAYS use the tools provided to fetch, scrape, download, render HTML, or send requests.
-
-TIME LIMIT RULES:
-- Each task has a hard 3-minute limit.
-- The server response includes a "delay" field indicating elapsed time.
-- If your answer is wrong retry again.
-
-STOPPING CONDITION:
-- Only return "END" when a server response explicitly contains NO new URL.
-- DO NOT return END under any other condition.
-
-ADDITIONAL INFORMATION YOU MUST INCLUDE WHEN REQUIRED:
-- Email: {EMAIL}
-- Secret: {SECRET}
-
-YOUR JOB:
-- Follow pages exactly.
-- Extract data reliably.
-- Never guess.
-- Submit correct answers.
-- Continue until no new URL.
-- Then respond with: END
+Output "END" only when the quiz is fully complete.
 """
 
 prompt = ChatPromptTemplate.from_messages([
@@ -93,65 +99,77 @@ prompt = ChatPromptTemplate.from_messages([
 
 llm_with_prompt = prompt | llm
 
-
-# -------------------------------------------------
-# AGENT NODE
-# -------------------------------------------------
+# -----------------------------
+# Agent Node
+# -----------------------------
 def agent_node(state: AgentState):
+    """A single LLM step."""
     result = llm_with_prompt.invoke({"messages": state["messages"]})
     return {"messages": state["messages"] + [result]}
 
-
-# -------------------------------------------------
-# GRAPH
-# -------------------------------------------------
-def route(state):
+# -----------------------------
+# Router Logic
+# -----------------------------
+def route(state: AgentState):
+    """Decide whether next step is tool execution or LLM."""
     last = state["messages"][-1]
-    # support both objects (with attributes) and plain dicts
+
+    # --- Detect tool calls ---
     tool_calls = None
+
     if hasattr(last, "tool_calls"):
-        tool_calls = getattr(last, "tool_calls", None)
+        tool_calls = last.tool_calls
     elif isinstance(last, dict):
         tool_calls = last.get("tool_calls")
 
     if tool_calls:
         return "tools"
-    # get content robustly
+
+    # --- Detect END condition ---
     content = None
     if hasattr(last, "content"):
-        content = getattr(last, "content", None)
+        content = last.content
     elif isinstance(last, dict):
         content = last.get("content")
 
     if isinstance(content, str) and content.strip() == "END":
         return END
-    if isinstance(content, list) and content[0].get("text").strip() == "END":
-        return END
+
+    if isinstance(content, list):
+        txt = content[0].get("text", "").strip()
+        if txt == "END":
+            return END
+
     return "agent"
+
+# -----------------------------
+# Build Graph
+# -----------------------------
 graph = StateGraph(AgentState)
 
 graph.add_node("agent", agent_node)
 graph.add_node("tools", ToolNode(TOOLS))
 
-
-
 graph.add_edge(START, "agent")
 graph.add_edge("tools", "agent")
+
 graph.add_conditional_edges(
-    "agent",    
-    route       
+    "agent",
+    route
 )
 
 app = graph.compile()
 
-
-# -------------------------------------------------
-# TEST
-# -------------------------------------------------
-def run_agent(url: str) -> str:
-    app.invoke({
-        "messages": [{"role": "user", "content": url}]},
+# -----------------------------
+# Run-Agent entry (used by HF API)
+# -----------------------------
+def run_agent(url: str, payload: Any = None):
+    """
+    Main entry called by http_app.py
+    Executes the entire agent workflow.
+    """
+    app.invoke(
+        {"messages": [{"role": "user", "content": url}]},
         config={"recursion_limit": RECURSION_LIMIT},
     )
-    print("Tasks completed succesfully")
-
+    return "Tasks completed successfully"
